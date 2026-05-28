@@ -4,7 +4,7 @@ const fetch = require('node-fetch');
 const app = express();
 app.use(express.json());
 
-const API_KEY = process.env.ANTHROPIC_API_KEY;
+const API_KEY = process.env.GEMINI_API_KEY;
 const PORT = process.env.PORT || 3000;
 
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
@@ -38,19 +38,17 @@ Antworte NUR mit einem validen JSON-Objekt ohne Markdown:
 }`;
 
   try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': API_KEY,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: 'claude-haiku-4-5-20251001',
-        max_tokens: 4096,
-        messages: [{ role: 'user', content: prompt }],
-      }),
-    });
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${API_KEY}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { temperature: 0.3, maxOutputTokens: 4096 },
+        }),
+      }
+    );
 
     if (!response.ok) {
       const err = await response.json();
@@ -58,7 +56,9 @@ Antworte NUR mit einem validen JSON-Objekt ohne Markdown:
     }
 
     const data = await response.json();
-    let content = data.content[0].text.trim();
+    let content = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+
+    if (!content) return res.status(500).json({ error: 'Keine Antwort vom KI-Modell' });
 
     // JSON aus Antwort extrahieren
     const start = content.indexOf('{');
