@@ -217,8 +217,14 @@ function parseRecipeText(text, url, platform) {
 
   if (lines.length < 2) return null;
 
-  // Titel: erste Zeile, die keine reine URL ist
-  const titleLine = lines.find(l => !/^https?:\/\/\S+$/.test(l)) || lines[0];
+  // Titel: erste sinnvolle Zeile (kein Username, keine URL, kein Datum)
+  const isSkippableLine = (l) =>
+    /^https?:\/\/\S+$/.test(l) ||                       // reine URL
+    /^[@_][\w._]{2,}[@_]?$/.test(l) ||                  // Instagram-Username wie _name_ oder @name
+    /^\d[\d,.]*[KkMm]?\s*(likes?|comments?|views?|Tsd\.?|shares?)/i.test(l) || // "39.1 Tsd. Likes"
+    /^(on|am|vom?)\s+\w+\s+\d/i.test(l);                // "on September 15"
+
+  const titleLine = lines.find(l => !isSkippableLine(l)) || lines[0];
   const title = titleLine
     .replace(/#\w+/g, '')
     .replace(/[\u{1F300}-\u{1FFFF}]/gu, '')
@@ -234,9 +240,10 @@ function parseRecipeText(text, url, platform) {
     const line = lines[i];
     if (!line || line.length < 2) continue;
 
-    // Social-Media-Zeilen und reine URLs ignorieren
+    // Social-Media-Zeilen, Usernamen und reine URLs ignorieren
     if (/^(#\w|@\w|follow|like|comment|share|save|tag|link in bio)/i.test(line)) continue;
     if (/^https?:\/\/\S+$/.test(line)) continue;
+    if (/^[@_][\w._]{2,}[@_]?$/.test(line)) continue; // Instagram-Username wie _name_
 
     // Abschnitts-Header erkennen
     if (/^(zutaten|ingredients?|what you need|you.ll need|f[uü]r\s+\d|fuer\s+\d|makes?\s+\d|serves?\s+\d)/i.test(line)) {
