@@ -15,9 +15,9 @@ app.post('/extract', async (req, res) => {
   const platform = detectPlatform(url || '');
 
   try {
-    // Versuche URL zu fetchen und Schema.org Rezeptdaten zu lesen
     let recipe = null;
 
+    // 1. Schema.org aus URL lesen (fuer Rezept-Blogs)
     if (url) {
       try {
         const pageRes = await fetch(url, {
@@ -31,12 +31,12 @@ app.post('/extract', async (req, res) => {
       } catch (_) {}
     }
 
-    // Falls kein Schema gefunden oder Text übergeben: Text parsen
+    // 2. Text parsen (OCR oder Copy-Paste)
     if (!recipe && text) {
       recipe = parseRecipeText(text, url, platform);
     }
 
-    // Fallback: Rezept aus URL-Keywords generieren
+    // 3. Fallback
     if (!recipe) {
       recipe = generateFromUrl(url, platform);
     }
@@ -47,7 +47,7 @@ app.post('/extract', async (req, res) => {
   }
 });
 
-// Schema.org JSON-LD Rezept aus HTML extrahieren
+// Schema.org JSON-LD aus HTML extrahieren
 function extractSchemaRecipe(html, url, platform) {
   const matches = html.match(/<script[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi);
   if (!matches) return null;
@@ -57,7 +57,6 @@ function extractSchemaRecipe(html, url, platform) {
       const json = match.replace(/<script[^>]*>/, '').replace(/<\/script>/, '');
       const data = JSON.parse(json);
       const items = Array.isArray(data) ? data : [data, ...(data['@graph'] || [])];
-
       for (const item of items) {
         if (item['@type'] === 'Recipe' || (Array.isArray(item['@type']) && item['@type'].includes('Recipe'))) {
           return formatSchemaRecipe(item, url, platform);
@@ -71,10 +70,9 @@ function extractSchemaRecipe(html, url, platform) {
 function formatSchemaRecipe(item, url, platform) {
   const ingredients = (item.recipeIngredient || []).map(ing => parseIngredient(ing));
   const steps = (item.recipeInstructions || []).map((s, i) => {
-    const text = typeof s === 'string' ? s : (s.text || s.name || '');
-    return `Schritt ${i + 1}: ${text}`;
+    const t = typeof s === 'string' ? s : (s.text || s.name || '');
+    return `Schritt ${i + 1}: ${t}`;
   });
-
   return {
     id: Date.now().toString(),
     title: item.name || 'Rezept',
@@ -83,35 +81,71 @@ function formatSchemaRecipe(item, url, platform) {
     cookTime: parseDuration(item.cookTime || item.totalTime),
     servings: parseInt(item.recipeYield) || 4,
     imageUrl: extractImage(item.image),
-    ingredients,
-    steps,
-    sourceUrl: url,
-    platform,
+    ingredients, steps,
+    sourceUrl: url, platform,
     importedAt: new Date().toISOString(),
     isFavorite: false,
   };
 }
 
-// Reziept-Text direkt parsen (aus Copy-Paste)
+// Intelligenter Text-Parser (OCR / Copy-Paste)
 function parseRecipeText(text, url, platform) {
-  const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
-  if (lines.length < 3) return null;
+  // Zeilen bereinigen
+  const lines = text.split('\n')
+    .map(l => l.replace(/^[-*•·\s]+/, '').trim())
+    .filter(l => l.length > 1);
 
-  const title = lines[0].replace(/[🍴🥗🍕🍝🍜🍲🥘🫕]/g, '').trim() || 'Rezept';
+  if (lines.length < 2) return null;
+
+  // Titel: erste nicht-leere Zeile (Hashtags und Emojis entfernen)
+  const title = lines[0]
+    .replace(/#\w+/g, '')
+    .replace(/[\u{1F300}-\u{1FFFF}]/gu, '')
+    .trim() || 'Rezept';
+
   const ingredients = [];
   const steps = [];
   let stepNum = 1;
+  let section = 'unknown'; // unknown, ingredients, steps
 
   for (let i = 1; i < lines.length; i++) {
     const line = lines[i];
-    if (isIngredient(line)) {
+    if (!line || line.length < 2) continue;
+
+    // Social-Media-Zeilen ignorieren
+    if (/^(#\w|@\w|follow|like|comment|share|save|tag|link in bio)/i.test(line)) continue;
+
+    // Abschnitts-Header erkennen
+    if (/^(zutaten|ingredients?|what you need|you.ll need|fur [0-9]|fuer [0-9])/i.test(line)) {
+      section = 'ingredients'; continue;
+    }
+    if (/^(zubereitung|anleitung|method|instructions?|preparation|steps?|how to|so geht|und so)/i.test(line)) {
+      section = 'steps'; continue;
+    }
+
+    const isIng = isIngredient(line);
+    const isStep = /^\d+[\.\)]\s+\S/.test(line) ||
+      (line.length > 20 && /\b(mix|stir|cook|bake|add|heat|combine|place|cut|chop|dice|slice|mash|blend|grill|fry|boil|simmer|season|pour|fold|whisk|preheat|mischen|kochen|braten|schneiden|geben|erhitzen|vermengen|backen|ruehren|wuerzen|duensten|anbraten|verteilen|servieren|vorheizen|vermischen)\b/i.test(line));
+
+    if (section === 'ingredients' || (section === 'unknown' && isIng && steps.length === 0)) {
       ingredients.push(parseIngredient(line));
-    } else if (line.length > 15) {
+    } else if (section === 'steps' || (section === 'unknown' && isStep)) {
+      steps.push(`Schritt ${stepNum++}: ${line.replace(/^\d+[\.\)]\s*/, '')}`);
+    } else if (section === 'unknown' && ingredients.length > 0) {
+      // Nach Zutaten: Rest als Schritte
       steps.push(`Schritt ${stepNum++}: ${line.replace(/^\d+[\.\)]\s*/, '')}`);
     }
   }
 
-  if (ingredients.length === 0 && steps.length === 0) return null;
+  // Letzter Versuch: alle Zeilen aufteilen
+  if (ingredients.length === 0 && steps.length === 0) {
+    for (let i = 1; i < Math.min(lines.length, 30); i++) {
+      const l = lines[i];
+      if (l.length < 3 || /^#/.test(l)) continue;
+      if (isIngredient(l)) ingredients.push(parseIngredient(l));
+      else if (l.length > 8) steps.push(`Schritt ${stepNum++}: ${l.replace(/^\d+[\.\)]\s*/, '')}`);
+    }
+  }
 
   return {
     id: Date.now().toString(),
@@ -121,8 +155,9 @@ function parseRecipeText(text, url, platform) {
     cookTime: 30,
     servings: 4,
     imageUrl: null,
-    ingredients: ingredients.length > 0 ? ingredients : [{ name: 'Zutaten siehe Original', amount: '', unit: '', calories: 0, protein: 0, carbs: 0, fat: 0 }],
-    steps: steps.length > 0 ? steps : ['Rezept aus Originalquelle entnehmen'],
+    ingredients: ingredients.length > 0 ? ingredients
+      : [{ name: 'Zutaten bitte pruefen', amount: '', unit: '', calories: 0, protein: 0, carbs: 0, fat: 0 }],
+    steps: steps.length > 0 ? steps : ['Zubereitung aus dem Original entnehmen'],
     sourceUrl: url || '',
     platform,
     importedAt: new Date().toISOString(),
@@ -130,81 +165,69 @@ function parseRecipeText(text, url, platform) {
   };
 }
 
-// Fallback: Rezept aus URL-Keywords
 function generateFromUrl(url, platform) {
-  const slug = (url || '').toLowerCase()
-    .replace(/https?:\/\/[^/]+/, '')
-    .replace(/[^a-z0-9\-]/g, ' ')
-    .trim();
-
-  const keywords = slug.split(/\s+/).filter(w => w.length > 3);
-  const name = keywords.slice(0, 3).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ') || 'Rezept';
-
   return {
     id: Date.now().toString(),
-    title: name || `${platform}-Rezept`,
-    description: 'Rezept wurde importiert. Bitte Zutaten und Schritte ergänzen.',
-    prepTime: 15,
-    cookTime: 30,
-    servings: 4,
-    imageUrl: null,
-    ingredients: [
-      { name: 'Zutaten bitte ergänzen', amount: '', unit: '', calories: 0, protein: 0, carbs: 0, fat: 0 }
-    ],
-    steps: ['Schritte bitte aus dem Original ergänzen'],
-    sourceUrl: url || '',
-    platform,
+    title: `${platform}-Rezept`,
+    description: 'Tipp: Screenshot-Tab nutzen fuer bessere Ergebnisse!',
+    prepTime: 15, cookTime: 30, servings: 4, imageUrl: null,
+    ingredients: [{ name: 'Bitte Screenshot-Tab nutzen', amount: '', unit: '', calories: 0, protein: 0, carbs: 0, fat: 0 }],
+    steps: ['Screenshot des Rezepts machen → Screenshot-Tab → importieren'],
+    sourceUrl: url || '', platform,
     importedAt: new Date().toISOString(),
     isFavorite: false,
   };
 }
 
 function isIngredient(line) {
-  return /\d+\s*(g|kg|ml|l|EL|TL|cup|oz|lb|Stück|Prise|Bund|Zehe|Scheibe)/i.test(line)
-    || /^\d+\s+\w+/.test(line);
+  // Deutsche + englische Einheiten
+  const unitPattern = /\d[\d\/.,]*\s*(g|kg|ml|l|cl|dl|EL|TL|tbsp|tsp|cups?|oz|lbs?|lb|Stueck|pcs|Prise|pinch|Bund|bunch|Zehe|clove|Scheibe|slice|can|dose)\b/i;
+  const simpleNum = /^[\d¼-¾⅐-⅟]+[\s\/]*\d*\s+(large|medium|small|whole|fresh|dried|gross|klein|mittel|frisch)\b/i;
+  const numIngredient = /^[\d¼-¾]+\s+[a-zA-ZÀ-ž]{3,}/;
+  return unitPattern.test(line) || simpleNum.test(line) || numIngredient.test(line);
 }
 
 function parseIngredient(text) {
-  const match = text.match(/^([\d,.]+)?\s*(g|kg|ml|l|EL|TL|cup|oz|lb|Stück|Prise|Bund|Zehe|Scheibe)?\s*(.+)/i);
-  const name = match ? match[3].trim() : text.trim();
-  const amount = match ? (match[1] || '') : '';
-  const unit = match ? (match[2] || '') : '';
+  const unitStr = 'g|kg|ml|l|cl|dl|EL|TL|tbsp|tsp|cups?|oz|lbs?|Stueck|pcs|Prise|pinch|Bund|bunch|Zehe|clove|Scheibe|slice';
+  const m = text.match(new RegExp(`^([\\d\\u00BC-\\u00BE.,\\/\\s]+)?\\s*(${unitStr})?\\s*(.+)`, 'i'));
+  const name = m ? m[3].trim().replace(/^(of |von )/i, '') : text.trim();
+  const amount = m ? (m[1] || '').trim() : '';
+  const unit = m ? (m[2] || '').trim() : '';
   const cal = estimateCalories(name, parseFloat(amount) || 100, unit);
-  return { name, amount, unit, calories: cal.calories, protein: cal.protein, carbs: cal.carbs, fat: cal.fat };
+  return { name, amount, unit, ...cal };
 }
 
 function estimateCalories(name, amount, unit) {
-  const grams = toGrams(amount, unit);
+  const g = toGrams(amount, unit);
   const n = name.toLowerCase();
-  // Grobe Nährwertschätzung nach Lebensmitteltyp
-  if (/mehl|nudel|reis|pasta|brot|zucker|hafer/.test(n)) return perGram(grams, 3.5, 0.1, 0.75, 0.01);
-  if (/butter|öl|fett|sahne/.test(n)) return perGram(grams, 7.0, 0.01, 0.01, 0.8);
-  if (/fleisch|hähnchen|rind|schwein|thunfisch|lachs|fisch/.test(n)) return perGram(grams, 1.8, 0.2, 0.0, 0.08);
-  if (/milch|joghurt|käse|ei/.test(n)) return perGram(grams, 1.0, 0.07, 0.05, 0.04);
-  if (/gemüse|salat|tomate|zwiebel|knoblauch|paprika|zucchini|spinat/.test(n)) return perGram(grams, 0.3, 0.02, 0.05, 0.005);
-  if (/obst|apfel|banane|beere|zitrone/.test(n)) return perGram(grams, 0.5, 0.01, 0.12, 0.002);
-  return perGram(grams, 1.0, 0.05, 0.15, 0.03);
+  if (/flour|mehl|pasta|noodle|nudel|rice|reis|bread|brot|sugar|zucker|oat|hafer|potato|kartoffel/.test(n)) return cal(g, 3.5, 0.1, 0.75, 0.01);
+  if (/butter|oil|oel|fat|fett|cream|sahne|avocado/.test(n)) return cal(g, 7.0, 0.01, 0.01, 0.8);
+  if (/chicken|beef|pork|turkey|lamb|tuna|salmon|fish|meat|fleisch|haeh|rind|schwein|lachs|fisch/.test(n)) return cal(g, 1.8, 0.2, 0.0, 0.08);
+  if (/milk|milch|yogurt|joghurt|cheese|kaese|feta|egg|ei/.test(n)) return cal(g, 1.0, 0.07, 0.05, 0.04);
+  if (/tomato|onion|garlic|pepper|zucchini|spinach|spinat|carrot|karotte|broccoli|cucumber/.test(n)) return cal(g, 0.3, 0.02, 0.05, 0.005);
+  if (/apple|banana|berry|lemon|orange|fruit|obst|apfel|banane|beere/.test(n)) return cal(g, 0.5, 0.01, 0.12, 0.002);
+  return cal(g, 1.0, 0.05, 0.15, 0.03);
 }
 
-function perGram(g, kcalPer, protPer, carbPer, fatPer) {
+function cal(g, k, p, c, f) {
   return {
-    calories: Math.round(g * kcalPer * 10) / 10,
-    protein: Math.round(g * protPer * 10) / 10,
-    carbs: Math.round(g * carbPer * 10) / 10,
-    fat: Math.round(g * fatPer * 10) / 10,
+    calories: Math.round(g * k * 10) / 10,
+    protein: Math.round(g * p * 10) / 10,
+    carbs: Math.round(g * c * 10) / 10,
+    fat: Math.round(g * f * 10) / 10,
   };
 }
 
 function toGrams(amount, unit) {
-  const a = parseFloat(amount) || 100;
+  const a = parseFloat(String(amount).replace(',', '.')) || 100;
   const u = (unit || '').toLowerCase();
   if (u === 'kg') return a * 1000;
-  if (u === 'ml' || u === 'l') return u === 'l' ? a * 1000 : a;
-  if (u === 'el') return a * 15;
-  if (u === 'tl') return a * 5;
-  if (u === 'cup') return a * 240;
+  if (u === 'l') return a * 1000;
+  if (u === 'tbsp' || u === 'el') return a * 15;
+  if (u === 'tsp' || u === 'tl') return a * 5;
+  if (u.startsWith('cup')) return a * 240;
   if (u === 'oz') return a * 28;
-  if (u === 'lb') return a * 454;
+  if (u.startsWith('lb')) return a * 454;
   return a;
 }
 
@@ -230,4 +253,4 @@ function detectPlatform(url) {
   return 'web';
 }
 
-app.listen(PORT, () => console.log(`RecipeSnap Backend läuft auf Port ${PORT}`));
+app.listen(PORT, () => console.log(`RecipeSnap Backend laeuft auf Port ${PORT}`));
