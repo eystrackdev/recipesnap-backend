@@ -6,6 +6,13 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 
+const BROWSER_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+  'Accept-Language': 'de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7',
+  'Accept-Encoding': 'gzip, deflate, br',
+};
+
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
 app.post('/extract', async (req, res) => {
@@ -16,25 +23,26 @@ app.post('/extract', async (req, res) => {
 
   try {
     let recipe = null;
-    let fetchedHtml = null;
 
-    // 1. Schema.org aus URL lesen (fuer Rezept-Blogs)
-    if (url) {
+    // ── 1. Instagram: Embed-Seite lesen (kein Login noetig) ──
+    if (!recipe && url && platform === 'instagram') {
+      recipe = await tryInstagramEmbed(url, platform);
+    }
+
+    // ── 2. TikTok: oEmbed-API ──
+    if (!recipe && url && platform === 'tiktok') {
+      recipe = await tryTikTokOembed(url, platform);
+    }
+
+    // ── 3. Normale Webseite: Schema.org + OG-Description ──
+    if (!recipe && url) {
       try {
-        const pageRes = await fetch(url, {
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept-Language': 'de-DE,de;q=0.9,en;q=0.8',
-          },
-          timeout: 10000,
-        });
+        const pageRes = await fetch(url, { headers: BROWSER_HEADERS, timeout: 10000 });
         if (pageRes.ok) {
-          fetchedHtml = await pageRes.text();
-          recipe = extractSchemaRecipe(fetchedHtml, url, platform);
-
-          // 1b. OG-Description lesen (enthaelt oft die Caption / Beschreibung)
+          const html = await pageRes.text();
+          recipe = extractSchemaRecipe(html, url, platform);
           if (!recipe) {
-            const ogText = extractOgText(fetchedHtml);
+            const ogText = extractOgText(html);
             if (ogText && ogText.length > 60) {
               recipe = parseRecipeText(ogText, url, platform);
             }
@@ -43,21 +51,21 @@ app.post('/extract', async (req, res) => {
       } catch (_) {}
     }
 
-    // 2. Text parsen (OCR oder Copy-Paste)
+    // ── 4. Text parsen (OCR oder Copy-Paste) ──
     if (!recipe && text) {
       recipe = parseRecipeText(text, url, platform);
     }
 
-    // 3. Social-Media ohne Ergebnis: hilfreiche Fehlermeldung
+    // ── 5. Social-Media immer noch nichts → klare Fehlermeldung ──
     if (!recipe && (platform === 'instagram' || platform === 'tiktok' || platform === 'facebook')) {
       return res.status(422).json({
         error: 'social_media_blocked',
         platform,
-        message: 'Instagram/TikTok/Facebook-Links koennen nicht automatisch gelesen werden. Bitte Caption-Text kopieren oder Screenshot machen.',
+        message: 'Caption konnte nicht gelesen werden. Bitte Caption-Text kopieren oder Screenshot machen.',
       });
     }
 
-    // 4. Fallback fuer andere Seiten
+    // ── 6. Allgemeiner Fallback ──
     if (!recipe) {
       recipe = generateFromUrl(url, platform);
     }
@@ -68,7 +76,77 @@ app.post('/extract', async (req, res) => {
   }
 });
 
-// OG-Description / OG-Title aus HTML lesen (z.B. Instagram Caption)
+// ── Instagram Embed-Seite ──
+async function tryInstagramEmbed(url, platform) {
+  try {
+    // Shortcode aus URL extrahieren: /p/CODE/, /reel/CODE/, /reels/CODE/
+    const shortcodeMatch = url.match(/\/(p|reel|reels|tv)\/([A-Za-z0-9_-]+)/);
+    if (!shortcodeMatch) return null;
+
+    const type = shortcodeMatch[1] === 'p' ? 'p' : 'reel';
+    const shortcode = shortcodeMatch[2];
+
+    // Embed-URL: gibt Caption ohne Login zurueck
+    const embedUrl = `https://www.instagram.com/${type}/${shortcode}/embed/captioned/`;
+    const res = await fetch(embedUrl, {
+      headers: {
+        ...BROWSER_HEADERS,
+        'Referer': 'https://www.instagram.com/',
+      },
+      timeout: 12000,
+    });
+
+    if (!res.ok) return null;
+    const html = await res.text();
+
+    // Caption aus dem Embed-HTML extrahieren
+    const caption = extractInstagramCaption(html);
+    if (!caption || caption.length < 30) return null;
+
+    return parseRecipeText(caption, url, platform);
+  } catch (_) {
+    return null;
+  }
+}
+
+function extractInstagramCaption(html) {
+  // Verschiedene Stellen, wo Instagram die Caption im Embed ablegt
+  const patterns = [
+    // JSON-Daten im Embed-Script
+    /"caption"\s*:\s*"((?:[^"\\]|\\.)*)"/,
+    // HTML-Klassen (wechseln, daher mehrere Varianten)
+    /class="[^"]*[Cc]aption[^"]*"[^>]*>[\s\S]*?<[^>]+>([\s\S]{20,}?)<\/(?:span|div|p)>/,
+    /class="[^"]*PostCaption[^"]*"[\s\S]*?>([\s\S]{20,}?)<\/\w/,
+    // OG-Description im Embed
+    /<meta[^>]*property="og:description"[^>]*content="([^"]{30,})"/i,
+    /<meta[^>]*content="([^"]{30,})"[^>]*property="og:description"/i,
+  ];
+
+  for (const p of patterns) {
+    const m = html.match(p);
+    if (m && m[1] && m[1].trim().length > 20) {
+      return decodeHtmlEntities(m[1].replace(/<[^>]+>/g, '\n').replace(/\\n/g, '\n').replace(/\\u[\dA-F]{4}/gi, c => String.fromCharCode(parseInt(c.slice(2), 16))));
+    }
+  }
+  return null;
+}
+
+// ── TikTok oEmbed ──
+async function tryTikTokOembed(url, platform) {
+  try {
+    const oembedUrl = `https://www.tiktok.com/oembed?url=${encodeURIComponent(url)}`;
+    const res = await fetch(oembedUrl, { headers: BROWSER_HEADERS, timeout: 8000 });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const text = [data.title, data.author_name].filter(Boolean).join('\n');
+    if (text.length < 20) return null;
+    return parseRecipeText(text, url, platform);
+  } catch (_) {
+    return null;
+  }
+}
+
+// ── OG/Meta-Description aus HTML ──
 function extractOgText(html) {
   const patterns = [
     /<meta[^>]*property="og:description"[^>]*content="([^"]{20,})"[^>]*>/i,
@@ -78,18 +156,19 @@ function extractOgText(html) {
   ];
   for (const p of patterns) {
     const m = html.match(p);
-    if (m) {
-      return m[1]
-        .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
-        .replace(/&quot;/g, '"').replace(/&#39;/g, "'")
-        .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(parseInt(n)))
-        .replace(/\\n/g, '\n');
-    }
+    if (m) return decodeHtmlEntities(m[1].replace(/\\n/g, '\n'));
   }
   return null;
 }
 
-// Schema.org JSON-LD aus HTML extrahieren
+function decodeHtmlEntities(str) {
+  return str
+    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, ' ')
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(parseInt(n)));
+}
+
+// ── Schema.org JSON-LD aus HTML extrahieren ──
 function extractSchemaRecipe(html, url, platform) {
   const matches = html.match(/<script[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi);
   if (!matches) return null;
@@ -130,16 +209,15 @@ function formatSchemaRecipe(item, url, platform) {
   };
 }
 
-// Intelligenter Text-Parser (OCR / Copy-Paste)
+// ── Text-Parser (OCR / Copy-Paste / Caption) ──
 function parseRecipeText(text, url, platform) {
-  // Zeilen bereinigen
   const lines = text.split('\n')
     .map(l => l.replace(/^[-*•·\s]+/, '').trim())
     .filter(l => l.length > 1);
 
   if (lines.length < 2) return null;
 
-  // Titel: erste nicht-leere Zeile, die keine reine URL ist
+  // Titel: erste Zeile, die keine reine URL ist
   const titleLine = lines.find(l => !/^https?:\/\/\S+$/.test(l)) || lines[0];
   const title = titleLine
     .replace(/#\w+/g, '')
@@ -150,7 +228,7 @@ function parseRecipeText(text, url, platform) {
   const ingredients = [];
   const steps = [];
   let stepNum = 1;
-  let section = 'unknown'; // unknown, ingredients, steps
+  let section = 'unknown';
 
   for (let i = 1; i < lines.length; i++) {
     const line = lines[i];
@@ -158,13 +236,13 @@ function parseRecipeText(text, url, platform) {
 
     // Social-Media-Zeilen und reine URLs ignorieren
     if (/^(#\w|@\w|follow|like|comment|share|save|tag|link in bio)/i.test(line)) continue;
-    if (/^https?:\/\/\S+$/.test(line)) continue; // reine URL-Zeile ignorieren
+    if (/^https?:\/\/\S+$/.test(line)) continue;
 
     // Abschnitts-Header erkennen
-    if (/^(zutaten|ingredients?|what you need|you.ll need|fur [0-9]|fuer [0-9])/i.test(line)) {
+    if (/^(zutaten|ingredients?|what you need|you.ll need|f[uü]r\s+\d|fuer\s+\d|makes?\s+\d|serves?\s+\d)/i.test(line)) {
       section = 'ingredients'; continue;
     }
-    if (/^(zubereitung|anleitung|method|instructions?|preparation|steps?|how to|so geht|und so)/i.test(line)) {
+    if (/^(zubereitung|anleitung|method|directions?|instructions?|preparation|steps?|how to|so geht|und so)/i.test(line)) {
       section = 'steps'; continue;
     }
 
@@ -177,7 +255,6 @@ function parseRecipeText(text, url, platform) {
     } else if (section === 'steps' || (section === 'unknown' && isStep)) {
       steps.push(`Schritt ${stepNum++}: ${line.replace(/^\d+[\.\)]\s*/, '')}`);
     } else if (section === 'unknown' && ingredients.length > 0) {
-      // Nach Zutaten: Rest als Schritte
       steps.push(`Schritt ${stepNum++}: ${line.replace(/^\d+[\.\)]\s*/, '')}`);
     }
   }
@@ -186,7 +263,7 @@ function parseRecipeText(text, url, platform) {
   if (ingredients.length === 0 && steps.length === 0) {
     for (let i = 1; i < Math.min(lines.length, 30); i++) {
       const l = lines[i];
-      if (l.length < 3 || /^#/.test(l)) continue;
+      if (l.length < 3 || /^#/.test(l) || /^https?:\/\//.test(l)) continue;
       if (isIngredient(l)) ingredients.push(parseIngredient(l));
       else if (l.length > 8) steps.push(`Schritt ${stepNum++}: ${l.replace(/^\d+[\.\)]\s*/, '')}`);
     }
@@ -225,7 +302,6 @@ function generateFromUrl(url, platform) {
 }
 
 function isIngredient(line) {
-  // Deutsche + englische Einheiten
   const unitPattern = /\d[\d\/.,]*\s*(g|kg|ml|l|cl|dl|EL|TL|tbsp|tsp|cups?|oz|lbs?|lb|Stueck|pcs|Prise|pinch|Bund|bunch|Zehe|clove|Scheibe|slice|can|dose)\b/i;
   const simpleNum = /^[\d¼-¾⅐-⅟]+[\s\/]*\d*\s+(large|medium|small|whole|fresh|dried|gross|klein|mittel|frisch)\b/i;
   const numIngredient = /^[\d¼-¾]+\s+[a-zA-ZÀ-ž]{3,}/;
