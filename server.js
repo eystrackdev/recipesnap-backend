@@ -16,17 +16,29 @@ app.post('/extract', async (req, res) => {
 
   try {
     let recipe = null;
+    let fetchedHtml = null;
 
     // 1. Schema.org aus URL lesen (fuer Rezept-Blogs)
     if (url) {
       try {
         const pageRes = await fetch(url, {
-          headers: { 'User-Agent': 'Mozilla/5.0 (compatible; RecipeSnap/1.0)' },
-          timeout: 8000,
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept-Language': 'de-DE,de;q=0.9,en;q=0.8',
+          },
+          timeout: 10000,
         });
         if (pageRes.ok) {
-          const html = await pageRes.text();
-          recipe = extractSchemaRecipe(html, url, platform);
+          fetchedHtml = await pageRes.text();
+          recipe = extractSchemaRecipe(fetchedHtml, url, platform);
+
+          // 1b. OG-Description lesen (enthaelt oft die Caption / Beschreibung)
+          if (!recipe) {
+            const ogText = extractOgText(fetchedHtml);
+            if (ogText && ogText.length > 60) {
+              recipe = parseRecipeText(ogText, url, platform);
+            }
+          }
         }
       } catch (_) {}
     }
@@ -36,7 +48,16 @@ app.post('/extract', async (req, res) => {
       recipe = parseRecipeText(text, url, platform);
     }
 
-    // 3. Fallback
+    // 3. Social-Media ohne Ergebnis: hilfreiche Fehlermeldung
+    if (!recipe && (platform === 'instagram' || platform === 'tiktok' || platform === 'facebook')) {
+      return res.status(422).json({
+        error: 'social_media_blocked',
+        platform,
+        message: 'Instagram/TikTok/Facebook-Links koennen nicht automatisch gelesen werden. Bitte Caption-Text kopieren oder Screenshot machen.',
+      });
+    }
+
+    // 4. Fallback fuer andere Seiten
     if (!recipe) {
       recipe = generateFromUrl(url, platform);
     }
@@ -46,6 +67,27 @@ app.post('/extract', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// OG-Description / OG-Title aus HTML lesen (z.B. Instagram Caption)
+function extractOgText(html) {
+  const patterns = [
+    /<meta[^>]*property="og:description"[^>]*content="([^"]{20,})"[^>]*>/i,
+    /<meta[^>]*content="([^"]{20,})"[^>]*property="og:description"[^>]*>/i,
+    /<meta[^>]*name="description"[^>]*content="([^"]{20,})"[^>]*>/i,
+    /<meta[^>]*content="([^"]{20,})"[^>]*name="description"[^>]*>/i,
+  ];
+  for (const p of patterns) {
+    const m = html.match(p);
+    if (m) {
+      return m[1]
+        .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+        .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(parseInt(n)))
+        .replace(/\\n/g, '\n');
+    }
+  }
+  return null;
+}
 
 // Schema.org JSON-LD aus HTML extrahieren
 function extractSchemaRecipe(html, url, platform) {
