@@ -97,10 +97,12 @@ function parseRecipeText(text, url, platform) {
 
   if (lines.length < 2) return null;
 
-  // Titel: erste nicht-leere Zeile (Hashtags und Emojis entfernen)
-  const title = lines[0]
+  // Titel: erste nicht-leere Zeile, die keine reine URL ist
+  const titleLine = lines.find(l => !/^https?:\/\/\S+$/.test(l)) || lines[0];
+  const title = titleLine
     .replace(/#\w+/g, '')
     .replace(/[\u{1F300}-\u{1FFFF}]/gu, '')
+    .replace(/\s*[·|–]\s*(Instagram|TikTok|Facebook|YouTube|Reels|Shorts).*$/i, '')
     .trim() || 'Rezept';
 
   const ingredients = [];
@@ -112,8 +114,9 @@ function parseRecipeText(text, url, platform) {
     const line = lines[i];
     if (!line || line.length < 2) continue;
 
-    // Social-Media-Zeilen ignorieren
+    // Social-Media-Zeilen und reine URLs ignorieren
     if (/^(#\w|@\w|follow|like|comment|share|save|tag|link in bio)/i.test(line)) continue;
+    if (/^https?:\/\/\S+$/.test(line)) continue; // reine URL-Zeile ignorieren
 
     // Abschnitts-Header erkennen
     if (/^(zutaten|ingredients?|what you need|you.ll need|fur [0-9]|fuer [0-9])/i.test(line)) {
