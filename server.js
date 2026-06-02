@@ -221,6 +221,8 @@ function parseRecipeText(text, url, platform) {
   const isSkippableLine = (l) =>
     /^https?:\/\/\S+$/.test(l) ||                       // reine URL
     /^[@_][\w._]{2,}[@_]?$/.test(l) ||                  // Instagram-Username wie _name_ oder @name
+    /^[a-zA-Z0-9][\w.]*_+$/.test(l) ||                  // Username der mit _ endet (z.B. schmidines_)
+    !l.includes(' ') && /^[a-zA-Z0-9][\w.]{3,}$/.test(l) && /[._]/.test(l) || // Username mit Punkt/Underscore ohne Leerzeichen
     /^\d[\d,.]*[KkMm]?\s*(likes?|comments?|views?|Tsd\.?|shares?)/i.test(l) || // "39.1 Tsd. Likes"
     /^(on|am|vom?)\s+\w+\s+\d/i.test(l);                // "on September 15"
 
@@ -244,6 +246,7 @@ function parseRecipeText(text, url, platform) {
     if (/^(#\w|@\w|follow|like|comment|share|save|tag|link in bio)/i.test(line)) continue;
     if (/^https?:\/\/\S+$/.test(line)) continue;
     if (/^[@_][\w._]{2,}[@_]?$/.test(line)) continue; // Instagram-Username wie _name_
+    if (/^[a-zA-Z0-9][\w.]*_+$/.test(line)) continue; // Username endet mit _ (z.B. schmidines_)
 
     // Abschnitts-Header erkennen
     if (/^(zutaten|ingredients?|what you need|you.ll need|f[uü]r\s+\d|fuer\s+\d|makes?\s+\d|serves?\s+\d)/i.test(line)) {
@@ -311,7 +314,7 @@ function generateFromUrl(url, platform) {
 function isIngredient(line) {
   const unitPattern = /\d[\d\/.,]*\s*(g|kg|ml|l|cl|dl|EL|TL|tbsp|tsp|cups?|oz|lbs?|lb|Stueck|pcs|Prise|pinch|Bund|bunch|Zehe|clove|Scheibe|slice|can|dose)\b/i;
   const simpleNum = /^[\d¼-¾⅐-⅟]+[\s\/]*\d*\s+(large|medium|small|whole|fresh|dried|gross|klein|mittel|frisch)\b/i;
-  const numIngredient = /^[\d¼-¾]+\s+[a-zA-ZÀ-ž]{3,}/;
+  const numIngredient = /^[\d¼-¾]+\s+[a-zA-ZÀ-ž]{2,}/;
   return unitPattern.test(line) || simpleNum.test(line) || numIngredient.test(line);
 }
 
