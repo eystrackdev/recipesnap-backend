@@ -241,6 +241,7 @@ function parseRecipeText(text, url, platform) {
   const steps = [];
   let stepNum = 1;
   let section = 'unknown';
+  let ingredientMode = false; // true sobald 2+ Zutaten gefunden
 
   for (let i = 1; i < lines.length; i++) {
     const line = lines[i];
@@ -260,21 +261,29 @@ function parseRecipeText(text, url, platform) {
 
     // Abschnitts-Header erkennen
     if (/^(zutaten|ingredients?|what you need|you.ll need|f[uü]r\s+\d|fuer\s+\d|makes?\s+\d|serves?\s+\d)/i.test(line)) {
-      section = 'ingredients'; continue;
+      section = 'ingredients'; ingredientMode = true; continue;
     }
     if (/^(zubereitung|anleitung|method|directions?|instructions?|preparation|steps?|how to|so geht|und so)/i.test(line)) {
-      section = 'steps'; continue;
+      section = 'steps'; ingredientMode = false; continue;
     }
 
     const isIng = isIngredient(line);
     const isStep = /^\d+[\.\)]\s+\S/.test(line) ||
       (line.length > 20 && /\b(mix|stir|cook|bake|add|heat|combine|place|cut|chop|dice|slice|mash|blend|grill|fry|boil|simmer|season|pour|fold|whisk|preheat|mischen|kochen|braten|schneiden|geben|erhitzen|vermengen|backen|ruehren|wuerzen|duensten|anbraten|verteilen|servieren|vorheizen|vermischen)\b/i.test(line));
 
-    if (section === 'ingredients' || (section === 'unknown' && isIng && steps.length === 0)) {
+    if (section === 'ingredients') {
       ingredients.push(parseIngredient(line));
-    } else if (section === 'steps' || (section === 'unknown' && isStep)) {
+    } else if (section === 'steps' || (section === 'unknown' && isStep && !ingredientMode)) {
+      ingredientMode = false;
       steps.push(`Schritt ${stepNum++}: ${line.replace(/^\d+[\.\)]\s*/, '')}`);
-    } else if (section === 'unknown' && ingredients.length > 0) {
+    } else if (section === 'unknown' && isIng) {
+      // Erkannte Zutat (mit Menge/Einheit)
+      ingredients.push(parseIngredient(line));
+      if (ingredients.length >= 2) ingredientMode = true;
+    } else if (ingredientMode && !isStep && line.length < 80) {
+      // Ingredient-Modus aktiv: Zeile ohne Menge trotzdem als Zutat (z.B. "Salat")
+      ingredients.push(parseIngredient(line));
+    } else if (section === 'unknown' && ingredients.length > 0 && !ingredientMode) {
       steps.push(`Schritt ${stepNum++}: ${line.replace(/^\d+[\.\)]\s*/, '')}`);
     }
   }
@@ -322,14 +331,14 @@ function generateFromUrl(url, platform) {
 }
 
 function isIngredient(line) {
-  const unitPattern = /\d[\d\/.,]*\s*(g|kg|ml|l|cl|dl|EL|TL|tbsp|tsp|cups?|oz|lbs?|lb|Stueck|pcs|Prise|pinch|Bund|bunch|Zehe|clove|Scheibe|slice|can|dose)\b/i;
+  const unitPattern = /\d[\d\/.,]*\s*(g|kg|ml|l|cl|dl|EL|TL|tbsp|tsp|cups?|oz|lbs?|lb|Stueck|pcs|Prisen?|pinch|Bund|bunch|Zehen?|cloves?|Scheiben?|slices?|can|dose|Dosen?|Tassen?|Pkg\.?|Packung)\b/i;
   const simpleNum = /^[\d¼-¾⅐-⅟]+[\s\/]*\d*\s+(large|medium|small|whole|fresh|dried|gross|klein|mittel|frisch)\b/i;
   const numIngredient = /^[\d¼-¾]+\s+[a-zA-ZÀ-ž]{2,}/;
   return unitPattern.test(line) || simpleNum.test(line) || numIngredient.test(line);
 }
 
 function parseIngredient(text) {
-  const unitStr = 'g|kg|ml|l|cl|dl|EL|TL|tbsp|tsp|cups?|oz|lbs?|Stueck|pcs|Prise|pinch|Bund|bunch|Zehe|clove|Scheibe|slice';
+  const unitStr = 'g|kg|ml|l|cl|dl|EL|TL|tbsp|tsp|cups?|oz|lbs?|lb|Stueck|pcs|Prisen?|pinch|Bund|bunch|Zehen?|cloves?|Scheiben?|slices?|can|dose|Dosen?|Tassen?|Pkg\\.?|Packung';
   const m = text.match(new RegExp(`^([\\d\\u00BC-\\u00BE.,\\/\\s]+)?\\s*(${unitStr})?\\s*(.+)`, 'i'));
   const name = m ? m[3].trim().replace(/^(of |von )/i, '') : text.trim();
   const amount = m ? (m[1] || '').trim() : '';
