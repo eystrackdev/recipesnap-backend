@@ -219,12 +219,16 @@ function parseRecipeText(text, url, platform) {
 
   // Titel: erste sinnvolle Zeile (kein Username, keine URL, kein Datum)
   const isSkippableLine = (l) =>
-    /^https?:\/\/\S+$/.test(l) ||                       // reine URL
-    /^[@_][\w._]{2,}[@_]?$/.test(l) ||                  // Instagram-Username wie _name_ oder @name
-    /^[a-zA-Z0-9][\w.]*_+$/.test(l) ||                  // Username der mit _ endet (z.B. schmidines_)
-    !l.includes(' ') && /^[a-zA-Z0-9][\w.]{3,}$/.test(l) && /[._]/.test(l) || // Username mit Punkt/Underscore ohne Leerzeichen
-    /^\d[\d,.]*[KkMm]?\s*(likes?|comments?|views?|Tsd\.?|shares?)/i.test(l) || // "39.1 Tsd. Likes"
-    /^(on|am|vom?)\s+\w+\s+\d/i.test(l);                // "on September 15"
+    /^https?:\/\/\S+$/.test(l) ||                        // reine URL
+    /^[@_][\w._]{2,}[@_]?$/.test(l) ||                   // @name oder _name_
+    /^[a-zA-Z0-9][\w.]*_+$/.test(l) ||                   // endet mit _ (z.B. schmidines_)
+    (!l.includes(' ') && /^[a-zA-Z0-9][\w.]{3,}$/.test(l) && (
+      /[._]/.test(l) ||                                   // Punkt/Underscore im Wort
+      !/[aeiouäöüAEIOUÄÖÜ]/.test(l) ||                  // keine Vokale (z.B. trphltv)
+      l.length > 13                                       // sehr langes Wort (z.B. mellisabnehmweg)
+    )) ||
+    /^\d[\d,.]*[KkMm]?\s*(likes?|comments?|views?|Tsd\.?|shares?)/i.test(l) ||
+    /^(on|am|vom?)\s+\w+\s+\d/i.test(l);
 
   const titleLine = lines.find(l => !isSkippableLine(l)) || lines[0];
   const title = titleLine
@@ -245,8 +249,14 @@ function parseRecipeText(text, url, platform) {
     // Social-Media-Zeilen, Usernamen und reine URLs ignorieren
     if (/^(#\w|@\w|follow|like|comment|share|save|tag|link in bio)/i.test(line)) continue;
     if (/^https?:\/\/\S+$/.test(line)) continue;
-    if (/^[@_][\w._]{2,}[@_]?$/.test(line)) continue; // Instagram-Username wie _name_
-    if (/^[a-zA-Z0-9][\w.]*_+$/.test(line)) continue; // Username endet mit _ (z.B. schmidines_)
+    if (/^[@_][\w._]{2,}[@_]?$/.test(line)) continue;
+    if (/^[a-zA-Z0-9][\w.]*_+$/.test(line)) continue;
+    if (!line.includes(' ') && /^[a-zA-Z0-9][\w.]{3,}$/.test(line) && (
+      /[._]/.test(line) || !/[aeiouäöüAEIOUÄÖÜ]/.test(line) || line.length > 13
+    )) continue;
+    // Instagram/TikTok Werbe- und Motivationstexte ignorieren
+    if (/\b(folg\w*|follow me|abonniere|subscribiere?|fuer\s+mehr|für\s+mehr|for more|link in bio|mehr rezepte|mehr content|transformation|giveaway)\b/i.test(line)) continue;
+    if (/\b(habe ich|ich habe|mir gern|trotz\s+\w+|\d+\s*kg\s*(abg|zug)|abgenommen|zugenommen|gewicht\s+verloren)\b/i.test(line)) continue;
 
     // Abschnitts-Header erkennen
     if (/^(zutaten|ingredients?|what you need|you.ll need|f[uü]r\s+\d|fuer\s+\d|makes?\s+\d|serves?\s+\d)/i.test(line)) {
