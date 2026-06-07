@@ -225,16 +225,35 @@ function parseRecipeText(text, url, platform) {
     (!l.includes(' ') && /^[a-zA-Z0-9][\w.]{3,}$/.test(l) && (
       /[._]/.test(l) ||                                   // Punkt/Underscore im Wort
       !/[aeiouäöüAEIOUÄÖÜ]/.test(l) ||                  // keine Vokale (z.B. trphltv)
-      l.length > 13                                       // sehr langes Wort (z.B. mellisabnehmweg)
+      l.length > 13 ||                                    // sehr langes Wort (z.B. mellisabnehmweg)
+      /^q[^u]/i.test(l) ||                               // q + kein u am Anfang (qlfkitchen)
+      (/^[bcdfghjklmnpqrstvwxyz]{4}/i.test(l) && !/^sch/i.test(l)) // 4+ Konsonanten (qlfk...)
     )) ||
     /^\d[\d,.]*[KkMm]?\s*(likes?|comments?|views?|Tsd\.?|shares?)/i.test(l) ||
     /^(on|am|vom?)\s+\w+\s+\d/i.test(l);
 
+  // Emoji-Stripping-Helfer (deckt auch ✨ U+2728, ⏱ U+23F1 ab)
+  const stripEmoji = s => s
+    .replace(/[\u{1F000}-\u{1FFFF}]/gu, '')
+    .replace(/[☀-➿⏠-⏿■-⛿]/g, '')
+    .trim();
+
   const titleLine = lines.find(l => !isSkippableLine(l)) || lines[0];
-  const title = titleLine
-    .replace(/#\w+/g, '')
-    .replace(/[\u{1F300}-\u{1FFFF}]/gu, '')
+  let title = stripEmoji(titleLine.replace(/#\w+/g, ''));
+
+  // Führendes Username-Wort entfernen (z.B. "qlfkitchen Power-Frühstücks-Bowl")
+  title = title.replace(/^(\S+)\s+(.+)/, (m, word, rest) => {
+    const w = word.toLowerCase();
+    const looksLikeUsername =
+      /^q[^u]/.test(w) ||
+      (!/[aeiouäöü]/.test(w) && word.length >= 4) ||
+      (/^[bcdfghjklmnpqrstvwxyz]{4}/i.test(w) && !/^sch/i.test(w));
+    return looksLikeUsername ? rest.trim() : m;
+  });
+
+  title = title
     .replace(/\s*[·|–]\s*(Instagram|TikTok|Facebook|YouTube|Reels|Shorts).*$/i, '')
+    .replace(/\s+/g, ' ')
     .trim() || 'Rezept';
 
   const ingredients = [];
@@ -253,19 +272,29 @@ function parseRecipeText(text, url, platform) {
     if (/^[@_][\w._]{2,}[@_]?$/.test(line)) continue;
     if (/^[a-zA-Z0-9][\w.]*_+$/.test(line)) continue;
     if (!line.includes(' ') && /^[a-zA-Z0-9][\w.]{3,}$/.test(line) && (
-      /[._]/.test(line) || !/[aeiouäöüAEIOUÄÖÜ]/.test(line) || line.length > 13
+      /[._]/.test(line) || !/[aeiouäöüAEIOUÄÖÜ]/.test(line) || line.length > 13 ||
+      /^q[^u]/i.test(line) || (/^[bcdfghjklmnpqrstvwxyz]{4}/i.test(line) && !/^sch/i.test(line))
     )) continue;
     // Instagram/TikTok Werbe- und Motivationstexte ignorieren
     if (/\b(folg\w*|follow me|abonniere|subscribiere?|fuer\s+mehr|für\s+mehr|for more|link in bio|mehr rezepte|mehr content|transformation|giveaway)\b/i.test(line)) continue;
     if (/\b(habe ich|ich habe|mir gern|trotz\s+\w+|\d+\s*kg\s*(abg|zug)|abgenommen|zugenommen|gewicht\s+verloren)\b/i.test(line)) continue;
 
-    // Abschnitts-Header erkennen
-    if (/^(zutaten|ingredients?|what you need|you.ll need|f[uü]r\s+\d|fuer\s+\d|makes?\s+\d|serves?\s+\d)/i.test(line)) {
+    // Nährwert-/Kalorienzeilen ignorieren (würden sonst als Zutaten geparst)
+    if (/\d+\s*kcal\b/i.test(line)) continue;
+
+    // Abschnitts-Header erkennen (Emojis erst entfernen: "✨ Zutaten", "🍳 Zubereitung")
+    const linePlain = stripEmoji(line);
+    if (/^(zutaten|ingredients?|what you need|you.ll need|f[uü]r\s+\d|fuer\s+\d|makes?\s+\d|serves?\s+\d)/i.test(linePlain)) {
       section = 'ingredients'; ingredientMode = true; continue;
     }
-    if (/^(zubereitung|anleitung|method|directions?|instructions?|preparation|steps?|how to|so geht|und so)/i.test(line)) {
+    if (/^(zubereitung|anleitung|method|directions?|instructions?|preparation|steps?|how to|so geht|und so)/i.test(linePlain)) {
       section = 'steps'; ingredientMode = false; continue;
     }
+
+    // Non-Food-Header im Ingredient-Modus überspringen
+    if (ingredientMode && /^(tipp\b|haltbarkeit|zubereitungszeit|hinweis|lagerung|aufbewahrung|portionen|ergibt\b)/i.test(linePlain)) continue;
+    // Zeile beginnt mit Emoji aber enthält keine Zahl → kein Ingredient (z.B. "⏱ Zubereitungszeit 10 min" würde durch kcal-Check laufen, aber "📦 Haltbarkeit" nicht)
+    if (ingredientMode && /^[\u{1F000}-\u{1FFFF}☀-➿⏠-⏿]/u.test(line) && !/\d/.test(line)) continue;
 
     const isIng = isIngredient(line);
     const isStep = /^\d+[\.\)]\s+\S/.test(line) ||
