@@ -291,10 +291,10 @@ function parseRecipeText(text, url, platform) {
       section = 'steps'; ingredientMode = false; continue;
     }
 
-    // Non-Food-Header im Ingredient-Modus überspringen
-    if (ingredientMode && /^(tipp\b|haltbarkeit|zubereitungszeit|hinweis|lagerung|aufbewahrung|portionen|ergibt\b)/i.test(linePlain)) continue;
-    // Zeile beginnt mit Emoji aber enthält keine Zahl → kein Ingredient (z.B. "⏱ Zubereitungszeit 10 min" würde durch kcal-Check laufen, aber "📦 Haltbarkeit" nicht)
-    if (ingredientMode && /^[\u{1F000}-\u{1FFFF}☀-➿⏠-⏿]/u.test(line) && !/\d/.test(line)) continue;
+    // Non-Food-Metazeilen IMMER überspringen (egal ob ingredientMode oder steps-Sektion)
+    if (/^(tipp\b|haltbarkeit|zubereitungszeit|hinweis|lagerung|aufbewahrung|portionen|ergibt\b|haltbar\b|aufbewahrungshinweis|nährwerte?\b|naehrwerte?\b)/i.test(linePlain)) continue;
+    // Emoji-Zeile ohne Zahl (z.B. "📦 Haltbarkeit", "⏱ Zubereitungszeit") immer überspringen
+    if (/^[\u{1F000}-\u{1FFFF}☀-➿⏠-⏿]/u.test(line) && !/\d/.test(line)) continue;
 
     const isIng = isIngredient(line);
     const isStep = /^\d+[\.\)]\s+\S/.test(line) ||
@@ -372,13 +372,20 @@ function parseIngredient(text) {
   const name = m ? m[3].trim().replace(/^(of |von )/i, '') : text.trim();
   const amount = m ? (m[1] || '').trim() : '';
   const unit = m ? (m[2] || '').trim() : '';
-  const cal = estimateCalories(name, parseFloat(amount) || 100, unit);
+  const parsedAmount = parseFloat(amount.replace(',', '.'));
+  // Keine Menge angegeben → 100g nur für echte Zutaten, Gewürze bekommen ihren eigenen Cap
+  const cal = estimateCalories(name, isNaN(parsedAmount) ? 100 : parsedAmount, unit);
   return { name, amount, unit, ...cal };
 }
 
 function estimateCalories(name, amount, unit) {
   const g = toGrams(amount, unit);
   const n = name.toLowerCase();
+  // Gewürze & Würzmittel: winzige Mengen, max. 10 g angenommen wenn keine Menge angegeben
+  if (/\b(salz|pfeffer|paprikapulver|kurkuma|ingwer|zimt|nelke|kardamom|oregano|basilikum|thymian|rosmarin|koriander|petersilie|schnittlauch|knoblauchpulver|zwiebelpulver|chili|curry\b|kreuzkümmel|kümmel|muskat|cayenne|sumach|safran|würzmischung|gewürz)\b/.test(n)) {
+    const spiceG = Math.min(g, 10); // max 10 g bei fehlender Mengenangabe
+    return cal(spiceG, 0.3, 0.01, 0.05, 0.01);
+  }
   if (/flour|mehl|pasta|noodle|nudel|rice|reis|bread|brot|sugar|zucker|oat|hafer|potato|kartoffel/.test(n)) return cal(g, 3.5, 0.1, 0.75, 0.01);
   if (/butter|oil|oel|fat|fett|cream|sahne|avocado/.test(n)) return cal(g, 7.0, 0.01, 0.01, 0.8);
   if (/chicken|beef|pork|turkey|lamb|tuna|salmon|fish|meat|fleisch|haeh|rind|schwein|lachs|fisch/.test(n)) return cal(g, 1.8, 0.2, 0.0, 0.08);
